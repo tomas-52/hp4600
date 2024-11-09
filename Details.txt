@@ -1,0 +1,232 @@
+This document tries to explain in detail at least some of the steps connected with the developement of the code for HP4600 Scanjet.
+It contains the following parts:
+
+- History
+- Code internals
+- Calibration (detailed how to)
+- Optional color fixing
+
+
+Part one: History
+
+For a long time I have been using the scanner under Windows XP because of the supplied software.
+Lately I had problems when scanning because all of a sudden the preview became disturbed by color strips.
+If that appeared I knew that the previous scan got wrong, had to restart and repeat the scan.
+Sometimes I did more bad scans than good ones.
+
+By that time Linux was already my daily driver, so I wanted to scan from Linux.
+To my great dismay I have found that my scanner is not supported.
+After a while I have finally found the code published on Github by Triften Chmil.
+I have compiled the code only to find that the scan results did not meet my quality requirements.
+The pictures scanned had visible differences between strips.
+If I knew by that time that this problem could be probably resolved by changing SetRegisters2ax values I could have stopped there.
+
+The fix code supplied seemed promising so I started to search for a method how to solve the problem this way.
+I have written a code for many different methods only to find that they did not work for all samples I used.
+In the end I came to see that working by strips cannot solve the problem, that I must go by individual vertical lines.
+There are 5128 of them which means too much for the fixing calculation.
+From now on I have shifted my attention to the scan code itself and the consts tables.
+
+Soon I have recognized that the F000 and 1C6C tables bear the calibration information for the scanner.
+Trying to use the values from my snoop logs improved the situation but part of the picture still had differences between strips.
+I concluded that the values should be modified but did not know how.
+The snoop log does not help much here because it is organized as a hex dump which means 16 values on a line.
+In the end the overlaps helped me there, I managed to identify their individual lines by writing FF values into their bytes.
+So I have detected that each individual vertical line is addressed by 12 bytes.
+Another step forward was to find out that they are grouped by RGB colors, 4 bytes for each, 2 for white and 2 for dark shading.
+Finally I had an idea how to calibrate and could create my first calibration sheet.
+
+
+Part two: Code internals
+
+Coming this far I think that I already began analyzing the code.
+There were evidently at least two things that bothered me - the time for scanning (most of it idling) and the resolution.
+Most of my scans under Windows were done at 100 or 150 dpi.
+Why should I scan at 600 dpi, get a large BMP file, go to a software that could handle it and to scale it down for further use?
+The anylysis was rather painful but finally I have identified at least some repeated patterns of code.
+Not quite evident because using different data sent to the scanner, and also differing from those in my snoop logs.
+They are called SetRegisters2ax, SetRegisters2xx, CCDSetup, BunchOfConfig, and WriteTable1000.
+Then there are in the code not named sequences of writing and reading other tables from the consts file.
+
+After that, grouping the sequences according to their meaning and sucession, and some notes made by Triften, I could tell some parts of the code.
+The scanner (driven by the HP software) does shortly before each actual scan something like autocalibration.
+Not knowing how to work with the data sent to the PC I considered this part of the code as superfluous so I removed it.
+I did the same for other parts of the code, sometimes not even knowing their purpose, but evidently not of any use (first checking that).
+There were for instance large blocks of reading 200 tables (according to snoop logs writing and reading),
+when writing the PC put the first 32 bytes from the previous reading to unchanging rest, so it probably queried some condition of the scanner.
+Again not knowing the values of the first batch to send and how to work with the data received this part was removed.
+
+The work with the scanner under Windows (HP software) has distinct procedures:
+establishing connection with the PC, initialization and warm up, preview, scaned area selection, autocalibration, scan, and next scan or finish.
+Only at the end of my work I have observed that when going for the next scan the lamp stays on.
+When working with the code there was no next and the lamp went usually off, when it stayed on I considered that as an error condition.
+In that state the calibration needed much time before the scanner got stabilized and could not be interrupted without losing that time.
+Primarilly when searching for the warm up instruction I thought it was writing to register 96-23-96-23.
+After I wanted to add the goto next command I have found out that it is writing to register 00-00-86-01.
+I do not mind not knowing the difference between those two, for me it is important that it works.
+
+I do not understand the meaning of all the named sequences but have recognized some:
+
+SetRegisters2ax allows for the lighting of individual strips.
+The values probably do not change during one scan but slightly differ in between. Under Windows they are stored in \temp\staticOffset.
+I think that for good calibration it is best to get them from the mentioned file of maybe better from a snoop log.
+When it cannot be done, calibration will override the differences (but may be more cumbersome).
+I do not know what the individual values mean, I recognized that only every fourth value differs, I use here 11 - 18 - 17 - 18.
+They are hexadecimal and it is importand to know that increasing all of them by 1 makes the scan uniformly lighter.
+(Changing them in another way will lead to differences in shading or color between the strips.
+I did not take the trouble to analyze how this works.)
+
+SetRegisters2xx, CCDSetup, BunchOfConfig and Table600 decide the scan resolution (not sure if all of them).
+They differ throughout the code and snoop log. That made me wonder about the importance of the differences.
+By trial and error I have found that the last occurence (just before the actual scan) is important.
+With the exception of 600 dpi resolution only one is used in the final code, for 600 dpi 3 different BunchOfConfig must be used.
+
+In the end for each resolution the corresponding hp4600consts.h file must be used, though using the same calibration data if you do not decide differently.
+
+
+Part three: Calibration
+
+The calibration is rather tiresome and repetitive time taking process.
+Before going for that make sure that you cannot achieve the desired effect by getting SetRegisters2ax and F000+1C6C tables from your snoop log.
+If not prepare to spend at least an hour of uninterrupted work time to achieve acceptable results.
+
+I started out by scanning first a black sample then a white one.
+Only later I realized that scanning a black and white sample can make the process considerably easier and faster.
+The calibration.ods file is a modification of the original one, adding an extra area for the input data and copying them to the previously used location.
+For calibration in the scanner holder I recomend to make a dedicated sample, for calibration without it just place the samples side by side.
+
+The procedure is based on the idea that the differences between the RGB values of the sample and the values calculated from the scan
+should be applied to the respective calibration values to get an equal result.
+This would be a simple one step operation if the change of dark shading did not have important impact on white shading, and vice versa.
+According to that it is necessary to make the change, recompile, rescan the sample and see the result, then repeat the steps.
+
+The scan_cal.c code consists of standard 600 dpi scan, picture rotation without overlap removal and calculation of RGB values.
+They are calculated for each vertical line twice, for the upper black part and for the lower white part of the sample.
+The content of the tempscal.txt file is to be copied to the designed place of the "input" sheet of calibration.ods.
+The differences between the desired and the scan values are calculated there.
+Multiplied by the iteration speed factor they are sent to appropriate position on the "calc" sheet.
+There on the left are the values used for the last scan and on the right the newly calculated values.
+It is necessary to check that they do not exceed the limits (at the bottom end of the sheet are the min and max values).
+If some of the values is not within the 0 - 255 limits the corresponding cells are printed white on red.
+It usually happens individually at the edges of the picture or if the iteration speed factor is set too high.
+For the individual cell the corresponding value on the left should be edited so that the value on the right gets into limit.
+If everything is OK the values calculated on the right shall be copied to the left to take place for the next scan.
+When this is done the values are sent to the "output" sheet where they are converted to the strings used in consts file.
+
+It is important to have samples of good known RGB values.
+I have done many calibrations just on RGB values calculated fron scans in Windows, estimated ones or even based on not good match with RAL cards.
+There was always some problem. It is also good to have some difficult samples to check the results.
+Usually dark samples expose that something is wrong, e.g. uniform dark grey sample will show color drift or difference between strips.
+Also the wooden veneer of my table was surprizingly one of the most exacting samples.
+
+The following text will probably seem a little like a description for a noob to you but I could not think of a better way how to describe it.
+As already mentioned before the calibration consists in creating a table (in fact F000 and 1C6C) containing values of white and dark shading.
+To achieve that you need a black and white sample covering the entire scaned area.
+For me two A3 sheets from the art department at stationary shop was the first solution.
+Then I used one black and one white A4 sheet and measured the dimensions of the scanner holder.
+For me it was 272 x 388 mm (top to bottom across the paper stops.
+Based on that I have cut the sheets to 272 x 194 mm and then pasted them side by side together.
+This sample sould be placed in the scanner with the black part on top.
+(If you will calibrate the scanner without the frame it is not necessary to cut the sheets.
+Simply placing a black sample on top and white sample below so that the dividing line is in the centre will also do that.
+Just make a control scan and make sure that the dividing line is aproximately in the centre.)
+
+For the whole width and almost all height of the samples the code calculates average RGB values for each vertical line.
+The calculated values are stored in tempscal.txt file, for the pupose of possible visual control tempscal.bmp can be used.
+
+The compile instruction is the same as for other scan code files, that is:   gcc scan_cal.c -o cal_scan -lusb
+The cal_scan command is invoked without any parameter or name.
+It does not check for existing files, supposing that tempscan.bmp and both tempscal files will not be used for other purposes.
+The existing files will be overritten on next scan.
+
+When calibrating I have four application windows running (in this order I find it best, named according to Plasma desktop):
+Konzole, tempscal.txt in Kate, calibration.ods in Calc, hp4600consts_600.h in Kate (and possibly System monitor to follow the execution flow).
+
+First run scan to warm up the lamp, then run cal_scan and wait until it is finished.
+Go to the tempscal window and copy the contents (Ctrl+A, Ctrl+C).
+Go to the calibration window's "input" sheet and paste the values to the colored cell AA2.
+Wait until it is done then switch to the "calc" sheet and select colomns AW to NH to copy them (Ctrl+C)
+Again check that all is OK (Ctrl+End), if there is some error condition - white print on red background, the corresponding cells on the left should be modified.
+If everything is OK go to the top (Ctrl+Home) and paste the calculated values to the colored cell B2 (Ctrl+Shift+V). ( !!! The values not the contents !!!)
+Then switch to "output" sheet and select its contents for copy (Ctrl+Shift+End, Ctrl+C, and Ctrl+Home to prepare for the next time).
+Go to the hp4600consts window.
+When preparing for calibration you should find "f00" and delete everything from the beginning of this line to the end of the file.
+If prepared just paste the data (Ctrl+V) to the end of the file, Save, and Undo to prepare for the next time.
+It is time to go back to the Konzole, say N to the running cal_scan, recompile for the new calibration values and restart the process anew.
+
+On the left side of the Input sheet, in the first row, there are several values to be explained:
+The cells A1 for dark shading and J1 for white shading could be called interpolation speed factor.
+The higher the value there is, the greater the correction calculated.
+I have used values of 2-7 for A1 and 16-240 for J1 (starting with higher values).
+If the value is too low you will not see much improvement for many interpolations, if it is too high it may go to the oposite extreme.
+
+The following three numbers in bold grey print display the average values for all lines, in RGB order.
+They serve as an aproximate information on how close you are to the desired values.
+Those are the next three values in bold red. Change them according to your samples.
+Below the desired values are the calculated corrections.
+I consider the charts on the right side of the sheet to be the real indicator of the state of iteration.
+They display the actual distribution of RGB values across the width of the sample.
+In ideal case (never achived) there would be a narrow horizontal line for each color.
+
+A side note:
+I have done a test calibration using SetRegisters2ax values changed by 2 units for a darker shading.
+Then I scanned at 150 dpi with standard calibration and this one, and also with SetRegisters2ax scan values changed by 2 units for lighter shading.
+Comparing the resulting RGB values brought the following conclusions:
+- changing the values has more impact on dark samples (on the smaller RGB values)
+- the average of RGB (shade of grey) differs from -5 to +1 on standard, and from +15 to +3 on lighter scans
+- avarage of the above values is -1 or +7 respectively.
+The impact on the color rendition is yet to be evaluated.
+Some colors do not quite match, strangely the worst case is dark gray that gets purple to brown tint.
+
+
+Chapter four: Optional color fixing
+
+From the many methods I have tried at the beginning of my work I have kept in mind one that uses the desired values for calculation.
+It has two modifications, the first is quite simple and is based on the premise that the minimum value when scanning black sample could be 0,
+and the maximum value when scanning white sample could be 255.
+Using this color fixing modification enhances the contrast, but usually the dark samples become even darker.
+
+The second modification takes into account the (supposed) real RGB values of black and white samples
+(in fact the corrrections could be calculated for any two samples coming from the opposite sides of light and dark).
+It is more complex, based on the same ideas, but stumbles a bit on getting the real RGB values.
+In the end I have used the values for calibration.
+Using this color fixing modification makes a 150 dpi scan equal in lighting and color to a 600 dpi scan.
+(In fact on uniform colored samples I have observed still some difference between the strips. On most of them this method reduced or removed that.)
+It makes scanning at 150 dpi preferable to 600 dpi. Scanning is faster and you get equal or better results.
+However it cannot be incorporated in the scan code, it can be used only if you decide so.
+
+I have already mentioned that scans converted from a higher resolution differ a little.
+It is because each conversion divides the number of pixels per line by 2 and if the number of bytes per line is not divisible by 4 rejects even more pixels
+(a primitive conversion I have created; the rule of four is the BMP specification).
+(Always bear in mind that the number of bytes per line is equal to "size of file in bytes - 54" divided by "number of lines",
+when you subtract 3 x "number of pixels" you get the number of bytes added to meet the BMP specification).
+
+So I considered which color fixing files I should submit.
+In the end, as I do not expect many users for other resolutions, I opted to submit only the one created for the basic 150 dpi scan.
+
+The corresponding files are:     get_BGR_150.c, get_BGR_pix.c, cfix_f.c, cfix_x.c and koefs_150.ods.
+
+When compiled the first one calculates the average values of RGB for each vertical line of a 1274x1760 bmp file.
+The second calculates the min and max values for the same file.
+The output of both is sent to screen so it should be redirected in the form of:
+
+    ./getbgr sample_file > output_file
+
+then the contents of this file should be copied to a free space on the respective sheet of koefs_150.ods
+From there the columns containing the RGB values should be copied to the corresponding columns in the calculation part.
+This is rather too many steps and could be simplified by modifying the code, I did not do it because it is done only once after (each) calibration.
+The koefs file contains 2 sheets - coefs for the min-max values, and e-var for the extended second modification.
+
+The calculated q and k values are to be transfered to the corresponding part of the cfix file and formated to the form of an array as shown now.
+The name string in the definitions appends to the original name of the file. So the syntax is:
+
+    cfix input_file
+
+Testing on different scan samples did not bring any decision which of the methods to use.
+For some the first gives better results, for other the second.
+If I will see any need to use them I will probably choose according to the result.
+
+
+Have you read all of the above?
+If so, now you probably know more than I do.
+tomas
